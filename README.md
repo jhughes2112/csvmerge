@@ -78,13 +78,17 @@ fields are quoted only when they need to be.
   by cell similarity, so an edited row is recognized as an edit rather than an
   unrelated delete and add. Alignment is order-preserving, and the merged
   output follows "ours" ordering (that's the file the result replaces).
-- **Moves** are recognized: a row one side relocated (deleted here, identical
-  copy inserted there) is merged at its new position with the other side's
-  edits folded in — so one side can shuffle every row while the other side
-  edits cells, and both survive. If the other side deleted the moved row, the
-  deletion wins. Limitation: a row that one side moved *and edited* in the
-  same commit is not tracked as a move; if the other side also edited it, that
-  degrades to a delete/edit conflict plus the relocated copy.
+- **Moves** are recognized: a row one side relocated is merged at its new
+  position with the other side's edits folded in — so one side can shuffle
+  every row while the other side edits cells, and both survive. This includes
+  rows that were moved *and edited* in the same commit: exact copies pair
+  first, then remaining deletions pair to remaining insertions by cell
+  similarity (best matches first), so even "reverse every row and edit every
+  one of them" merges against the other side's edits. If the other side
+  deleted a moved row, an unedited move loses to the delete; a moved-and-edited
+  row becomes a delete/edit conflict flagged at its new position. The heuristic
+  boundary: a "moved" row must still share at least half its cells with the
+  original — below that it reads as a genuine delete plus an unrelated add.
 
 ## Merge semantics
 

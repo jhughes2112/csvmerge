@@ -19,10 +19,11 @@ public sealed class RowAlignment
     public required List<(int Slot, int SideRow)> Insertions { get; init; }
 
     /// <summary>
-    /// Moves: a base row this side deleted whose exact content reappears as an
+    /// Moves: a base row this side deleted whose content reappears as an
     /// insertion elsewhere was really relocated, not deleted. Maps base row ->
-    /// inserted side row and the reverse. Only exact copies (over shared
-    /// columns) qualify; a row that was moved AND edited is not tracked.
+    /// inserted side row and the reverse. Exact copies (over shared columns)
+    /// pair first; remaining insertions pair to remaining deleted rows by cell
+    /// similarity, so a row that was moved AND edited is still tracked.
     /// </summary>
     public required Dictionary<int, int> MoveTargetByBase { get; init; }
     public required Dictionary<int, int> MoveSourceBySideRow { get; init; }
@@ -76,6 +77,43 @@ public static class RowAligner
                 if (unmatchedByKey.TryGetValue(sideKeys[s], out var q) && q.Count > 0)
                 {
                     int r = q.Dequeue();
+                    moveTargetByBase[r] = s;
+                    moveSourceBySideRow[s] = r;
+                }
+            }
+
+            // Pass 2: a moved row may ALSO have been edited, so its content is
+            // no longer an exact copy. Pair the remaining deleted base rows with
+            // the remaining insertions by cell similarity, best matches first
+            // (iterated mutual-best), so "moved and edited" is recognized rather
+            // than degrading to a delete plus an unrelated add.
+            var freeBase = new List<int>();
+            for (int r = 0; r < baseRows.Count; r++)
+                if (baseToSide[r] < 0 && !moveTargetByBase.ContainsKey(r)) freeBase.Add(r);
+            var freeIns = new List<int>();
+            foreach (var (_, s) in insertions)
+                if (!moveSourceBySideRow.ContainsKey(s)) freeIns.Add(s);
+
+            if (freeBase.Count > 0 && freeIns.Count > 0 &&
+                (long)freeBase.Count * freeIns.Count <= GapPairingBudget)
+            {
+                var candidates = new List<(double Sim, int R, int S)>();
+                foreach (int r in freeBase)
+                {
+                    foreach (int s in freeIns)
+                    {
+                        double sim = Similarity(baseRows[r], sideRows[s], baseToSideCols);
+                        if (sim >= SimilarityThreshold) candidates.Add((sim, r, s));
+                    }
+                }
+                var usedBase = new HashSet<int>();
+                var usedSide = new HashSet<int>();
+                foreach (var (_, r, s) in candidates
+                    .OrderByDescending(c => c.Sim).ThenBy(c => c.R).ThenBy(c => c.S))
+                {
+                    if (usedBase.Contains(r) || usedSide.Contains(s)) continue;
+                    usedBase.Add(r);
+                    usedSide.Add(s);
                     moveTargetByBase[r] = s;
                     moveSourceBySideRow[s] = r;
                 }
@@ -224,11 +262,14 @@ public static class RowAligner
 
         if (nb == ns)
         {
-            // diff3 chunk semantics: the same number of rows replaced between the
-            // same anchors is a modification of each row in place, however heavy
-            // the edits — no similarity bar.
+            // diff3 chunk semantics: a single replaced row between the same
+            // anchors is a modification in place, however heavy the edit.
+            // Larger equal chunks pair positionally only where at least one
+            // cell agrees — zero-similarity rows are left unmatched so move
+            // detection can find their real counterparts elsewhere.
             for (int i = 0; i < nb; i++)
             {
+                if (nb > 1 && Similarity(baseRows[b0 + i], sideRows[s0 + i], colMap) <= 0) continue;
                 baseToSide[b0 + i] = s0 + i;
                 sideToBase[s0 + i] = b0 + i;
             }

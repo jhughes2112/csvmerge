@@ -904,19 +904,57 @@ EOF
 }
 
 t45() {
-  begin t45_move_and_edit_same_side "KNOWN LIMIT: feature moves AND edits the row upstream also edited -> not tracked as a move; delete/edit conflict + relocated copy"
+  begin t45_move_and_edit_same_side "feature moves AND edits the row upstream also edited -> both changes merge at the new position"
   seed_fruit
   feature; edit '/^5,elderberry/d;/^3,cherry/i 5,elderberry,51,4.50,purple,france'; commit "feature: move elderberry and set qty 51"
   main_;   edit 's/^5,elderberry,50,4.50,/5,elderberry,50,4.60,/'; commit "upstream: elderberry price 4.60"
+  rebase; expect_clean
+  expect_file <<'EOF'
+id,name,qty,price,color,origin
+1,apple,10,0.50,red,peru
+2,banana,20,0.25,yellow,ecuador
+5,elderberry,51,4.60,purple,france
+3,cherry,30,3.00,red,chile
+4,durian,5,8.00,green,malaysia
+EOF
+  end
+}
+
+t55() {
+  begin t55_move_and_edit_vs_delete "feature moves AND edits the row upstream deleted -> delete/edit conflict flagged at the new position"
+  seed_fruit
+  feature; edit '/^5,elderberry/d;/^3,cherry/i 5,elderberry,51,4.50,purple,france'; commit "feature: move elderberry and set qty 51"
+  main_;   edit '/^5,elderberry/d'; commit "upstream: delete elderberry"
   rebase; expect_stopped
   expect_file <<'EOF'
 id,name,qty,price,color,origin,_conflict
 1,apple,10,0.50,red,peru,
 2,banana,20,0.25,yellow,ecuador,
-5,elderberry,51,4.50,purple,france,
+5,elderberry,51,4.50,purple,france,deleted in upstream
 3,cherry,30,3.00,red,chile,
 4,durian,5,8.00,green,malaysia,
-5,elderberry,50,4.60,purple,france,deleted in rebased
+EOF
+  end
+}
+
+t56() {
+  begin t56_shuffle_and_edit_everything "feature reverses ALL rows and edits EVERY qty, upstream edits other columns -> all of it folds cleanly"
+  seed_fruit
+  feature
+  awk -F, 'BEGIN{OFS=","} NR==1{print;next}{$3=$3+1;a[NR]=$0} END{for(i=NR;i>1;i--)print a[i]}' "$FILE" > shuffled.tmp && mv shuffled.tmp "$FILE"
+  commit "feature: reverse all rows, bump every qty"
+  main_
+  edit 's/^2,banana,20,0.25,yellow,/2,banana,20,0.25,gold,/'
+  edit 's/^3,cherry,30,3.00,red,chile/3,cherry,30,3.00,red,peru/'
+  commit "upstream: banana color gold, cherry origin peru"
+  rebase; expect_clean
+  expect_file <<'EOF'
+id,name,qty,price,color,origin
+5,elderberry,51,4.50,purple,france
+4,durian,6,8.00,green,malaysia
+3,cherry,31,3.00,red,peru
+2,banana,21,0.25,gold,ecuador
+1,apple,11,0.50,red,peru
 EOF
   end
 }
@@ -1264,7 +1302,7 @@ t32; t33; t34
 section "semantic equivalence (quotes and whitespace)"
 t39; t40
 section "big reorganizations"
-t41; t42; t43; t44; t45
+t41; t42; t43; t44; t45; t55; t56
 section "multi-commit rebases"
 t35; t36
 section "combinations"

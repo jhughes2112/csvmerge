@@ -175,7 +175,8 @@ public static class ThreeWayMerger
         for (int slot = 0; slot <= baseTable.Rows.Count; slot++)
         {
             EmitInsertions(cols, baseTable, ours, theirs, oursRows, theirsRows,
-                oursInsBySlot.GetValueOrDefault(slot), theirsInsBySlot.GetValueOrDefault(slot), result);
+                oursInsBySlot.GetValueOrDefault(slot), theirsInsBySlot.GetValueOrDefault(slot),
+                labelOurs, labelTheirs, result);
 
             if (slot == baseTable.Rows.Count) break;
             int r = slot;
@@ -258,7 +259,7 @@ public static class ThreeWayMerger
     /// </summary>
     private static void EmitInsertions(List<ResultCol> cols, CsvTable baseTable, CsvTable ours, CsvTable theirs,
         RowAlignment oursRows, RowAlignment theirsRows,
-        List<int>? oursIns, List<int>? theirsIns, MergeResult result)
+        List<int>? oursIns, List<int>? theirsIns, string labelOurs, string labelTheirs, MergeResult result)
     {
         var oursProjected = new List<string[]>();
         foreach (int s in oursIns ?? [])
@@ -269,7 +270,18 @@ public static class ThreeWayMerger
                 // matched in place, moved by theirs too, or deleted.
                 int tr = theirsRows.BaseToSide[r];
                 if (tr < 0 && theirsRows.MoveTargetByBase.TryGetValue(r, out int theirsTarget)) tr = theirsTarget;
-                if (tr < 0) continue; // the mover didn't edit it, so theirs' delete wins
+                if (tr < 0)
+                {
+                    // Theirs deleted the row. An unedited move loses to the
+                    // delete; a moved-and-edited row is git's delete/modify
+                    // conflict, surfaced at the row's new position.
+                    if (!RowEdited(cols, baseTable.Rows[r], ours.Rows[s], oursSide: true)) continue;
+                    result.ConflictCount++;
+                    result.Lines.Add(new RowLine(
+                        ProjectRow(cols, ours.Rows[s], oursSide: true, baseTable.Rows[r]),
+                        RowConflict: $"deleted in {labelTheirs}"));
+                    continue;
+                }
                 MergeMatchedRow(cols, baseTable, ours, theirs, r, s, tr, result);
             }
             else
@@ -285,7 +297,15 @@ public static class ThreeWayMerger
             {
                 if (oursRows.MoveTargetByBase.ContainsKey(r)) continue; // both moved it; ours' position wins
                 int or = oursRows.BaseToSide[r];
-                if (or < 0) continue; // the mover didn't edit it, so ours' delete wins
+                if (or < 0)
+                {
+                    if (!RowEdited(cols, baseTable.Rows[r], theirs.Rows[s], oursSide: false)) continue;
+                    result.ConflictCount++;
+                    result.Lines.Add(new RowLine(
+                        ProjectRow(cols, theirs.Rows[s], oursSide: false, baseTable.Rows[r]),
+                        RowConflict: $"deleted in {labelOurs}"));
+                    continue;
+                }
                 MergeMatchedRow(cols, baseTable, ours, theirs, r, or, s, result);
             }
             else
