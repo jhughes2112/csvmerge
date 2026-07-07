@@ -27,9 +27,9 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONFIG="${CONFIG:-Release}"
-EXE="$ROOT/src/CsvMerge/bin/$CONFIG/net10.0/csvmerge.exe"
+EXE="${CSVMERGE_EXE:-$ROOT/src/CsvMerge/bin/$CONFIG/net10.0/csvmerge.exe}"
 [ -f "$EXE" ] || EXE="$ROOT/src/CsvMerge/bin/$CONFIG/net10.0/csvmerge"
-[ -f "$EXE" ] || { echo "csvmerge binary not found under $CONFIG; run: dotnet build -c $CONFIG" >&2; exit 2; }
+[ -f "$EXE" ] || { echo "csvmerge binary not found (set CSVMERGE_EXE or run: dotnet build -c $CONFIG)" >&2; exit 2; }
 command -v cygpath >/dev/null 2>&1 && EXE="$(cygpath -m "$EXE")"
 
 WORK="${CSVMERGE_E2E_DIR:-$(mktemp -d)}"
@@ -1268,10 +1268,74 @@ EOF
 }
 
 t54() {
-  begin t54_install_command "csvmerge install registers the merge driver in local git config"
+  begin t54_install_command "csvmerge install registers the merge AND diff drivers in local git config"
   "$EXE" install > /dev/null 2>&1 || fail_ "install exited nonzero"
-  [ "$(git config merge.csvmerge.driver)" = "csvmerge %O %A %B" ] || fail_ "driver config not written"
-  [ -n "$(git config merge.csvmerge.name)" ] || fail_ "driver name not written"
+  [ "$(git config merge.csvmerge.driver)" = "csvmerge %O %A %B" ] || fail_ "merge driver config not written"
+  [ -n "$(git config merge.csvmerge.name)" ] || fail_ "merge driver name not written"
+  [ "$(git config diff.csvmerge.command)" = "csvmerge gitdiff" ] || fail_ "diff driver config not written"
+  end
+}
+
+# ============================================================ semantic diff ==
+
+t57() {
+  begin t57_git_semantic_diff "git diff uses the semantic driver: cell changes and moves instead of line noise"
+  git config diff.csvmerge.command "\"$EXE\" gitdiff"
+  printf '*.csv merge=csvmerge diff=csvmerge\n' > .gitattributes
+  seed_fruit
+  edit 's/^2,banana,20,/2,banana,21,/'
+  edit '/^5,elderberry/d;/^3,cherry/i 5,elderberry,50,4.50,purple,france'
+  git diff > "$LOG" 2>&1
+  grep -q "csvdiff a/$FILE b/$FILE" "$LOG" || fail_ "missing csvdiff header"
+  grep -q '~ row \[id=2\]: qty: 20 -> 21' "$LOG" || fail_ "missing cell change line"
+  grep -q '> row \[id=5\] moved (5 -> 3)' "$LOG" || fail_ "missing move line"
+  grep -q '^@@' "$LOG" && fail_ "raw unified-diff hunks leaked through"
+  end
+}
+
+t58() {
+  begin t58_diff_cli_direct "csvmerge diff: exit 0 identical (even requoted), exit 1 with cell-level output on change"
+  cat > old.csv <<'EOF'
+id,name,qty
+1,apple,10
+2,banana,20
+3,cherry,30
+EOF
+  printf '"id","name","qty"\n"1","apple","10"\n"2","banana","20"\n"3","cherry","30"\n' > requoted.csv
+  sed 's/^2,banana,20/2,banana,25/' old.csv > edited.csv
+
+  "$EXE" diff old.csv requoted.csv > /dev/null 2>&1
+  [ $? -eq 0 ] || fail_ "requote-only diff should exit 0"
+
+  "$EXE" diff old.csv edited.csv > diff.out 2>&1
+  [ $? -eq 1 ] || fail_ "changed file should exit 1"
+  grep -q '~ row \[id=2\]: qty: 20 -> 25' diff.out || fail_ "missing semantic change line"
+  end
+}
+
+# ========================================================= weighted identity ==
+
+t59() {
+  begin t59_weighted_identity "constant columns don't fake identity: move+heavy-edit tracked by distinctive id/name through a real rebase"
+  seed <<'EOF'
+id,name,qty,status,region
+1,apple,10,active,us
+2,banana,20,active,us
+3,cherry,30,active,us
+4,durian,40,active,us
+5,elderberry,50,active,us
+EOF
+  feature; edit '/^3,cherry/d;1a 3,cherry,31,inactive,eu'; commit "feature: move cherry to top, edit qty+status+region"
+  main_;   edit 's/^3,cherry,/3,cherries,/'; commit "upstream: rename cherry -> cherries"
+  rebase; expect_clean
+  expect_file <<'EOF'
+id,name,qty,status,region
+3,cherries,31,inactive,eu
+1,apple,10,active,us
+2,banana,20,active,us
+4,durian,40,active,us
+5,elderberry,50,active,us
+EOF
   end
 }
 
@@ -1313,6 +1377,10 @@ section "other git commands"
 t50; t51; t52
 section "CLI direct"
 t53; t54
+section "semantic diff"
+t57; t58
+section "weighted identity"
+t59
 
 echo
 echo "passed $PASS, failed $FAIL, total $((PASS + FAIL))"

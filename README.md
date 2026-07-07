@@ -1,6 +1,7 @@
 # csvmerge
 
-A git-native three-way merge driver for CSV files, built for **rebase**.
+A git-native three-way merge driver **and semantic diff driver** for CSV
+files, built for **rebase**.
 
 Most CSV merge tools ask you to configure a key column and fall apart the moment
 someone renames a header or reorders anything. `csvmerge` takes the approach git
@@ -78,6 +79,13 @@ fields are quoted only when they need to be.
   by cell similarity, so an edited row is recognized as an edit rather than an
   unrelated delete and add. Alignment is order-preserving, and the merged
   output follows "ours" ordering (that's the file the result replaces).
+- **Similarity is distinctiveness-weighted.** Each column is weighted by how
+  varied its values are in the ancestor: agreeing on a unique id column is
+  strong evidence two rows are the same row; agreeing on a `status` column
+  that says `active` everywhere is almost none. Discriminating columns are
+  detected automatically — no key configuration — so boilerplate columns can't
+  fake row identity, and a real move is recognized even when the edits touched
+  several low-information columns.
 - **Moves** are recognized: a row one side relocated is merged at its new
   position with the other side's edits folded in — so one side can shuffle
   every row while the other side edits cells, and both survive. This includes
@@ -104,32 +112,69 @@ Rows inserted by both sides at the same position are deduplicated when
 identical, merged-with-annotation when similar (probably the same logical
 record), and both kept when unrelated — ours first.
 
-## Install
+## Semantic diff
+
+The same alignment engine powers a cell-level diff, so `git diff`, `git show`
+and `git log -p` stop rendering CSV changes as line noise:
+
+```
+csvdiff a/data.csv b/data.csv
+~ col qty -> count
+~ row [id=2]: count: 20 -> 25; color: yellow -> gold
+> row [id=5] moved (5 -> 2): count: 50 -> 51
+- row [id=4]: 4,durian,5,8.00,green
++ row [id=7]: 7,grape,60,1.10,green
+```
+
+Rows are labelled by the auto-detected discriminating column (`[id=2]`; by
+row number `[#2]` when no column is distinctive enough), moves are shown as
+moves instead of a rewrite of the whole file, column adds/removes/renames and
+reorders are reported as such (`+ col`, `- col`, `~ col`, `> cols reordered`),
+and quote-only or whitespace-only changes produce no diff at all. Also
+available standalone: `csvmerge diff <old> <new> [-d <delimiter>]` (exit 0
+identical, 1 different, 2 error).
+
+## Build
+
+```
+build.bat
+```
+
+produces `dist\csvmerge.exe` — a single native (Native AOT) executable with no
+.NET runtime dependency, a few MB in size, instant startup. Requires the
+.NET 10 SDK and Visual Studio 2022 with the "Desktop development with C++"
+workload (the AOT compiler needs the MSVC linker); the script tells you what's
+missing if the build fails. Alternatively install as a dotnet tool:
 
 ```
 dotnet pack src/CsvMerge -c Release
 dotnet tool install --global csvmerge --add-source src/CsvMerge/bin/Release
 ```
 
-Then register the merge driver (per repo, or `--global` for all repos):
+## Install into a repo
+
+With `csvmerge` on PATH, register the merge and diff drivers (per repo, or
+`--global` for all repos):
 
 ```
 csvmerge install [--global]
 ```
 
-and map CSV files to it in `.gitattributes`:
+and map CSV files to them in `.gitattributes`:
 
 ```
-*.csv merge=csvmerge
+*.csv merge=csvmerge diff=csvmerge
 ```
 
 From then on `git rebase`, `git merge`, `git cherry-pick` and `git stash pop`
-use csvmerge automatically for `*.csv`.
+use csvmerge automatically for `*.csv`, and `git diff` shows semantic diffs.
 
 ## Manual use
 
 ```
 csvmerge <base> <ours> <theirs> [options]
+csvmerge diff <old> <new> [-d <delimiter>]
+csvmerge install [--global]
 
   -o, --output <file>       write the result here instead of over <ours>
       --stdout              print the result instead of writing a file
@@ -160,7 +205,7 @@ Unit tests (merge algorithm, in-process):
 dotnet test
 ```
 
-End-to-end scenario suite — 54 self-contained scripts that each build a real
+End-to-end scenario suite — 59 self-contained scripts that each build a real
 git repo, branch, edit CSVs with sed, commit, and **rebase through the
 installed merge driver**, then verify the merged file byte-for-byte (requires
 bash + git; on Windows run from Git Bash):
@@ -177,10 +222,12 @@ shape and its `_conflict` annotation, quote/whitespace equivalence, CRLF and
 BOM preservation, add/add (file created on both branches), the
 resolve-and-continue workflow, multi-commit rebases, and the same driver
 running under `git cherry-pick`, `git merge`, and `git stash pop` (in each,
-the currently checked-out side is the one preserved). A final section
-exercises the CLI directly: `--stdout`, `-o`, `--conflict-column`, `install`,
-and the 0/1/2 exit codes. `CSVMERGE_E2E_DIR=<path>` keeps the generated repos
-for inspection.
+the currently checked-out side is the one preserved). Further sections
+exercise the CLI directly (`--stdout`, `-o`, `--conflict-suffix`, `install`,
+the 0/1/2 exit codes), the semantic diff through real `git diff`, and
+weighted identity through a real rebase. `CSVMERGE_E2E_DIR=<path>` keeps the
+generated repos for inspection; `CSVMERGE_EXE=<path>` points the suite at a
+specific binary (e.g. the Native AOT build in `dist/`).
 
 Out of scope by design: whole-file renames/deletes (git resolves those before
 any merge driver runs) and non-UTF-8 encodings.

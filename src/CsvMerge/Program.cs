@@ -27,6 +27,10 @@ public static class Program
         }
         if (args[0] == "install")
             return Install(args.Skip(1).ToArray());
+        if (args[0] == "diff")
+            return DiffCommand(args.Skip(1).ToArray());
+        if (args[0] == "gitdiff")
+            return GitDiffCommand(args.Skip(1).ToArray());
 
         var positional = new List<string>();
         string? output = null;
@@ -97,6 +101,69 @@ public static class Program
         return args[++i];
     }
 
+    /// <summary>csvmerge diff &lt;old&gt; &lt;new&gt; — semantic diff; exit 0 same, 1 different, 2 error.</summary>
+    private static int DiffCommand(string[] args)
+    {
+        var positional = new List<string>();
+        string delimiter = ",";
+        for (int i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "-d" or "--delimiter": delimiter = Next(args, ref i); break;
+                default:
+                    if (args[i].StartsWith('-'))
+                        throw new ArgumentException($"unknown option '{args[i]}' (see --help)");
+                    positional.Add(args[i]);
+                    break;
+            }
+        }
+        if (positional.Count != 2)
+            throw new ArgumentException("expected exactly two files: diff <old> <new>");
+
+        var oldTable = LoadOrEmpty(positional[0], delimiter);
+        var newTable = LoadOrEmpty(positional[1], delimiter);
+        var (text, different) = SemanticDiff.Diff(oldTable, newTable, delimiter);
+        if (different)
+        {
+            Console.WriteLine($"--- {positional[0]}");
+            Console.WriteLine($"+++ {positional[1]}");
+            Console.Out.Write(text);
+        }
+        return different ? 1 : 0;
+    }
+
+    /// <summary>
+    /// Git external-diff contract (diff.csvmerge.command): called with
+    /// path old-file old-hex old-mode new-file new-hex new-mode [new-path similarity].
+    /// Output is informational; always exits 0.
+    /// </summary>
+    private static int GitDiffCommand(string[] args)
+    {
+        if (args.Length < 7) return 0; // unmerged entry or unknown shape: nothing to show
+
+        string path = args[0];
+        string newPath = args.Length >= 9 ? args[7] : path;
+        var oldTable = LoadOrEmpty(args[1], ",");
+        var newTable = LoadOrEmpty(args[4], ",");
+
+        var (text, different) = SemanticDiff.Diff(oldTable, newTable, ",");
+        if (different)
+        {
+            Console.WriteLine($"csvdiff a/{path} b/{newPath}");
+            Console.Out.Write(text);
+        }
+        return 0;
+    }
+
+    /// <summary>Git hands /dev/null (or a missing path) for created/deleted files.</summary>
+    private static CsvTable LoadOrEmpty(string path, string delimiter)
+    {
+        if (path == "/dev/null" || path == "nul" || !File.Exists(path))
+            return CsvTable.Parse("", delimiter);
+        return CsvTable.Load(path, delimiter);
+    }
+
     private static bool HasUtf8Bom(string path)
     {
         using var stream = File.OpenRead(path);
@@ -111,13 +178,14 @@ public static class Program
 
         GitConfig(scope, "merge.csvmerge.name", "CSV three-way merge driver (csvmerge)");
         GitConfig(scope, "merge.csvmerge.driver", "csvmerge %O %A %B");
+        GitConfig(scope, "diff.csvmerge.command", "csvmerge gitdiff");
 
-        Console.WriteLine($"Registered the 'csvmerge' merge driver in {(global ? "global" : "local")} git config.");
-        Console.WriteLine("Now map CSV files to it in .gitattributes (checked in) or .git/info/attributes:");
+        Console.WriteLine($"Registered the 'csvmerge' merge and diff drivers in {(global ? "global" : "local")} git config.");
+        Console.WriteLine("Now map CSV files to them in .gitattributes (checked in) or .git/info/attributes:");
         Console.WriteLine();
-        Console.WriteLine("    *.csv merge=csvmerge");
+        Console.WriteLine("    *.csv merge=csvmerge diff=csvmerge");
         Console.WriteLine();
-        Console.WriteLine("csvmerge must be on PATH when git runs the driver.");
+        Console.WriteLine("csvmerge must be on PATH when git runs the drivers.");
         return 0;
     }
 
@@ -147,6 +215,7 @@ public static class Program
 
             Usage:
               csvmerge <base> <ours> <theirs> [options]
+              csvmerge diff <old> <new> [-d <delimiter>]
               csvmerge install [--global]
 
             Merges <ours> and <theirs> using <base> as the common ancestor and writes
@@ -173,8 +242,14 @@ public static class Program
 
             Exit codes: 0 clean merge, 1 conflicts, 2 error.
 
-            install registers the merge driver in git config; add "*.csv merge=csvmerge"
-            to .gitattributes to activate it.
+            diff prints a cell-level semantic diff (rows aligned by content, moves
+            tracked, renames recognized, quoting/whitespace-only changes invisible).
+            Rows are labelled by an auto-detected discriminating column. Exit codes:
+            0 identical, 1 different, 2 error.
+
+            install registers the merge driver and the diff driver in git config;
+            add "*.csv merge=csvmerge diff=csvmerge" to .gitattributes to activate
+            them, after which git diff / log -p show semantic CSV diffs.
             """);
     }
 }

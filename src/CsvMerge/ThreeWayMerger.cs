@@ -30,8 +30,11 @@ public static class ThreeWayMerger
         var theirsRows = RowAligner.Align(baseTable.Rows, theirs.Rows, theirsCols.BaseToSide);
 
         var cols = BuildResultColumns(baseTable, ours, theirs, oursCols, theirsCols, oursRows, theirsRows, result);
+        var baseWeights = RowAligner.DistinctivenessWeights(baseTable.Rows, baseTable.Header.Length);
+        // Columns new in this merge have unknown distinctiveness; assume full weight.
+        var colWeights = cols.Select(c => c.BaseCol >= 0 ? baseWeights[c.BaseCol] : 1.0).ToArray();
         EmitHeader(cols, result);
-        EmitRows(cols, baseTable, ours, theirs, oursRows, theirsRows, labelOurs, labelTheirs, result);
+        EmitRows(cols, colWeights, baseTable, ours, theirs, oursRows, theirsRows, labelOurs, labelTheirs, result);
         return result;
     }
 
@@ -164,7 +167,7 @@ public static class ThreeWayMerger
         result.Lines.Add(new RowLine(names, conflicts));
     }
 
-    private static void EmitRows(List<ResultCol> cols, CsvTable baseTable, CsvTable ours, CsvTable theirs,
+    private static void EmitRows(List<ResultCol> cols, double[] colWeights, CsvTable baseTable, CsvTable ours, CsvTable theirs,
         RowAlignment oursRows, RowAlignment theirsRows, string labelOurs, string labelTheirs, MergeResult result)
     {
         var oursInsBySlot = oursRows.Insertions.GroupBy(i => i.Slot)
@@ -174,7 +177,7 @@ public static class ThreeWayMerger
 
         for (int slot = 0; slot <= baseTable.Rows.Count; slot++)
         {
-            EmitInsertions(cols, baseTable, ours, theirs, oursRows, theirsRows,
+            EmitInsertions(cols, colWeights, baseTable, ours, theirs, oursRows, theirsRows,
                 oursInsBySlot.GetValueOrDefault(slot), theirsInsBySlot.GetValueOrDefault(slot),
                 labelOurs, labelTheirs, result);
 
@@ -257,7 +260,7 @@ public static class ThreeWayMerger
     /// likely added the same logical record) keep ours' cells with theirs'
     /// differing values in the annotation; unrelated inserts are kept — ours first.
     /// </summary>
-    private static void EmitInsertions(List<ResultCol> cols, CsvTable baseTable, CsvTable ours, CsvTable theirs,
+    private static void EmitInsertions(List<ResultCol> cols, double[] colWeights, CsvTable baseTable, CsvTable ours, CsvTable theirs,
         RowAlignment oursRows, RowAlignment theirsRows,
         List<int>? oursIns, List<int>? theirsIns, string labelOurs, string labelTheirs, MergeResult result)
     {
@@ -324,7 +327,7 @@ public static class ThreeWayMerger
             {
                 if (theirsUsed[j]) continue;
                 if (oursRow.SequenceEqual(theirsProjected[j])) { identical = j; break; }
-                double sim = CellSimilarity(oursRow, theirsProjected[j]);
+                double sim = CellSimilarity(oursRow, theirsProjected[j], colWeights);
                 if (sim >= RowAligner.SimilarityThreshold && sim > bestSim) { bestSim = sim; similar = j; }
             }
 
@@ -355,13 +358,15 @@ public static class ThreeWayMerger
                 result.Lines.Add(new RowLine(theirsProjected[j]));
     }
 
-    private static double CellSimilarity(string[] a, string[] b)
+    private static double CellSimilarity(string[] a, string[] b, double[] weights)
     {
-        if (a.Length == 0) return 0;
-        int equal = 0;
+        double total = 0, equal = 0;
         for (int i = 0; i < a.Length; i++)
-            if (a[i] == b[i]) equal++;
-        return (double)equal / a.Length;
+        {
+            total += weights[i];
+            if (a[i] == b[i]) equal += weights[i];
+        }
+        return total <= 0 ? 0 : equal / total;
     }
 
     /// <summary>True when the side changed the base row in any merged column (including values in columns it added).</summary>

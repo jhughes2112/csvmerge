@@ -64,18 +64,20 @@ public static class MergeWriter
         return sb.ToString();
     }
 
-    private static void AppendField(StringBuilder sb, string value, string delimiter)
+    /// <summary>Quote a field only when it needs it (delimiter, quote, newline, or edge whitespace).</summary>
+    public static string FormatField(string value, string delimiter)
     {
         // Leading/trailing whitespace must be quoted or it would be trimmed
         // away (as insignificant unquoted whitespace) on the next parse.
         bool needsQuoting = value.Contains('"') || value.Contains('\r') || value.Contains('\n')
             || value.Contains(delimiter)
             || (value.Length > 0 && (char.IsWhiteSpace(value[0]) || char.IsWhiteSpace(value[^1])));
-        if (!needsQuoting)
-        {
-            sb.Append(value);
-            return;
-        }
-        sb.Append('"').Append(value.Replace("\"", "\"\"")).Append('"');
+        return needsQuoting ? "\"" + value.Replace("\"", "\"\"") + "\"" : value;
     }
+
+    public static string FormatRow(string[] cells, string delimiter)
+        => string.Join(delimiter, cells.Select(c => FormatField(c, delimiter)));
+
+    private static void AppendField(StringBuilder sb, string value, string delimiter)
+        => sb.Append(FormatField(value, delimiter));
 }

@@ -47,16 +47,13 @@ public static class RowAligner
         Array.Fill(baseToSide, -1);
         Array.Fill(sideToBase, -1);
 
+        var weights = DistinctivenessWeights(baseRows, baseToSideCols.Length);
         PatienceMatch(baseKeys, sideKeys, baseToSide, sideToBase);
-        PairGaps(baseRows, sideRows, baseToSideCols, baseToSide, sideToBase);
+        // Zero-similarity single-row replacements are only TENTATIVE pairs:
+        // they stand unless move detection finds a better home for either row.
+        var tentative = PairGaps(baseRows, sideRows, baseToSideCols, weights, baseToSide, sideToBase);
 
-        var insertions = new List<(int, int)>();
-        int lastBase = -1;
-        for (int s = 0; s < sideRows.Count; s++)
-        {
-            if (sideToBase[s] >= 0) lastBase = sideToBase[s];
-            else insertions.Add((lastBase + 1, s));
-        }
+        var insertions = ComputeInsertions(sideToBase);
 
         // Move detection: an inserted row identical (over shared columns) to a
         // base row this side "deleted" is a relocation. Pair them first-come.
@@ -102,7 +99,7 @@ public static class RowAligner
                 {
                     foreach (int s in freeIns)
                     {
-                        double sim = Similarity(baseRows[r], sideRows[s], baseToSideCols);
+                        double sim = Similarity(baseRows[r], sideRows[s], baseToSideCols, weights);
                         if (sim >= SimilarityThreshold) candidates.Add((sim, r, s));
                     }
                 }
@@ -120,6 +117,22 @@ public static class RowAligner
             }
         }
 
+        // Apply the tentative zero-similarity replacements that survived: if
+        // neither row was claimed as (part of) a move, the positional pairing
+        // is the best remaining explanation (diff3 semantics).
+        bool applied = false;
+        foreach (var (b, s) in tentative)
+        {
+            if (baseToSide[b] < 0 && sideToBase[s] < 0 &&
+                !moveTargetByBase.ContainsKey(b) && !moveSourceBySideRow.ContainsKey(s))
+            {
+                baseToSide[b] = s;
+                sideToBase[s] = b;
+                applied = true;
+            }
+        }
+        if (applied) insertions = ComputeInsertions(sideToBase);
+
         return new RowAlignment
         {
             BaseToSide = baseToSide,
@@ -130,18 +143,58 @@ public static class RowAligner
         };
     }
 
-    /// <summary>Fraction of shared columns whose cells are equal between a base row and a side row.</summary>
-    public static double Similarity(string[] baseRow, string[] sideRow, int[] baseToSideCols)
+    private static List<(int Slot, int SideRow)> ComputeInsertions(int[] sideToBase)
     {
-        int total = 0, equal = 0;
+        var insertions = new List<(int, int)>();
+        int lastBase = -1;
+        for (int s = 0; s < sideToBase.Length; s++)
+        {
+            if (sideToBase[s] >= 0) lastBase = sideToBase[s];
+            else insertions.Add((lastBase + 1, s));
+        }
+        return insertions;
+    }
+
+    /// <summary>
+    /// Per-column identity weights: the fraction of distinct values in the
+    /// column (sampled). A unique id column weighs 1.0; a column that says the
+    /// same thing on every row weighs almost nothing — agreeing on it is no
+    /// evidence that two rows are the same row.
+    /// </summary>
+    public static double[] DistinctivenessWeights(List<string[]> rows, int width)
+    {
+        var weights = new double[width];
+        if (rows.Count == 0)
+        {
+            Array.Fill(weights, 1.0);
+            return weights;
+        }
+        int sample = Math.Min(rows.Count, 500);
+        var seen = new HashSet<string>();
+        for (int c = 0; c < width; c++)
+        {
+            seen.Clear();
+            for (int i = 0; i < sample; i++) seen.Add(rows[i][c]);
+            weights[c] = (double)seen.Count / sample;
+        }
+        return weights;
+    }
+
+    /// <summary>
+    /// Distinctiveness-weighted fraction of shared columns whose cells are
+    /// equal between a base row and a side row.
+    /// </summary>
+    public static double Similarity(string[] baseRow, string[] sideRow, int[] baseToSideCols, double[] baseColWeights)
+    {
+        double total = 0, equal = 0;
         for (int b = 0; b < baseToSideCols.Length; b++)
         {
             int s = baseToSideCols[b];
             if (s < 0) continue;
-            total++;
-            if (baseRow[b] == sideRow[s]) equal++;
+            total += baseColWeights[b];
+            if (baseRow[b] == sideRow[s]) equal += baseColWeights[b];
         }
-        return total == 0 ? 0 : (double)equal / total;
+        return total <= 0 ? 0 : equal / total;
     }
 
     private static string Key(string[] row, int[] sharedBaseCols, bool identity, int[] baseToSideCols)
@@ -237,8 +290,8 @@ public static class RowAligner
     /// For every gap between matched rows, pair leftover base rows with leftover
     /// side rows by similarity (order-preserving DP), so edits are recognized.
     /// </summary>
-    private static void PairGaps(List<string[]> baseRows, List<string[]> sideRows,
-        int[] colMap, int[] baseToSide, int[] sideToBase)
+    private static List<(int B, int S)> PairGaps(List<string[]> baseRows, List<string[]> sideRows,
+        int[] colMap, double[] weights, int[] baseToSide, int[] sideToBase)
     {
         int prevB = -1, prevS = -1;
         var matches = new List<(int B, int S)>();
@@ -246,30 +299,37 @@ public static class RowAligner
             if (baseToSide[i] >= 0) matches.Add((i, baseToSide[i]));
         matches.Add((baseToSide.Length, sideToBase.Length)); // sentinel
 
+        var tentative = new List<(int B, int S)>();
         foreach (var (mb, ms) in matches)
         {
-            PairGap(baseRows, sideRows, colMap, prevB + 1, mb, prevS + 1, ms, baseToSide, sideToBase);
+            PairGap(baseRows, sideRows, colMap, weights, prevB + 1, mb, prevS + 1, ms, baseToSide, sideToBase, tentative);
             prevB = mb;
             prevS = ms;
         }
+        return tentative;
     }
 
-    private static void PairGap(List<string[]> baseRows, List<string[]> sideRows, int[] colMap,
-        int b0, int b1, int s0, int s1, int[] baseToSide, int[] sideToBase)
+    private static void PairGap(List<string[]> baseRows, List<string[]> sideRows, int[] colMap, double[] weights,
+        int b0, int b1, int s0, int s1, int[] baseToSide, int[] sideToBase, List<(int B, int S)> tentative)
     {
         int nb = b1 - b0, ns = s1 - s0;
         if (nb <= 0 || ns <= 0) return;
 
         if (nb == ns)
         {
-            // diff3 chunk semantics: a single replaced row between the same
-            // anchors is a modification in place, however heavy the edit.
-            // Larger equal chunks pair positionally only where at least one
-            // cell agrees — zero-similarity rows are left unmatched so move
-            // detection can find their real counterparts elsewhere.
+            // diff3 chunk semantics: rows in an equal-size chunk pair
+            // positionally where at least one cell agrees. A single replaced
+            // row with NO agreeing cell is only a tentative pairing — it stands
+            // unless move detection finds either row's real counterpart
+            // elsewhere. Zero-similarity rows in larger chunks are left for
+            // move detection outright.
             for (int i = 0; i < nb; i++)
             {
-                if (nb > 1 && Similarity(baseRows[b0 + i], sideRows[s0 + i], colMap) <= 0) continue;
+                if (Similarity(baseRows[b0 + i], sideRows[s0 + i], colMap, weights) <= 0)
+                {
+                    if (nb == 1) tentative.Add((b0, s0));
+                    continue;
+                }
                 baseToSide[b0 + i] = s0 + i;
                 sideToBase[s0 + i] = b0 + i;
             }
@@ -281,7 +341,7 @@ public static class RowAligner
             // Gap too large for the DP: fall back to positional pairing.
             for (int i = 0; i < Math.Min(nb, ns); i++)
             {
-                if (Similarity(baseRows[b0 + i], sideRows[s0 + i], colMap) >= SimilarityThreshold)
+                if (Similarity(baseRows[b0 + i], sideRows[s0 + i], colMap, weights) >= SimilarityThreshold)
                 {
                     baseToSide[b0 + i] = s0 + i;
                     sideToBase[s0 + i] = b0 + i;
@@ -303,7 +363,7 @@ public static class RowAligner
             {
                 double up = score[i - 1, j];
                 double left = score[i, j - 1];
-                double sim = Similarity(baseRows[b0 + i - 1], sideRows[s0 + j - 1], colMap);
+                double sim = Similarity(baseRows[b0 + i - 1], sideRows[s0 + j - 1], colMap, weights);
                 double diag = sim >= SimilarityThreshold ? score[i - 1, j - 1] + sim : double.NegativeInfinity;
 
                 if (diag >= up && diag >= left) { score[i, j] = diag; move[i, j] = 3; }
