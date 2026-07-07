@@ -12,6 +12,7 @@
     <ToolCommandName>csvmerge</ToolCommandName>
     <Version>0.1.0</Version>
     <Description>Git-native three-way merge driver for CSV files.</Description>
+    <ApplicationIcon>..\..\csvmerge.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>

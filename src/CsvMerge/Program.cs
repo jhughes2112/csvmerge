@@ -171,6 +171,8 @@ public static class Program
         return stream.Read(bom) == 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF;
     }
 
+    private const string AttributesLine = "*.csv merge=csvmerge diff=csvmerge";
+
     private static int Install(string[] args)
     {
         bool global = args.Contains("--global");
@@ -180,13 +182,85 @@ public static class Program
         GitConfig(scope, "merge.csvmerge.driver", "csvmerge %O %A %B");
         GitConfig(scope, "diff.csvmerge.command", "csvmerge gitdiff");
 
+        string attrFile;
+        if (global)
+        {
+            attrFile = GlobalAttributesFile();
+        }
+        else
+        {
+            string top = GitCapture("rev-parse", "--show-toplevel")
+                ?? throw new InvalidOperationException("not inside a git repository");
+            attrFile = Path.Combine(top, ".gitattributes");
+        }
+        bool added = EnsureAttributesLine(attrFile);
+
         Console.WriteLine($"Registered the 'csvmerge' merge and diff drivers in {(global ? "global" : "local")} git config.");
-        Console.WriteLine("Now map CSV files to them in .gitattributes (checked in) or .git/info/attributes:");
+        Console.WriteLine((added ? "Mapped *.csv to them in " : "*.csv was already mapped to them in ") + attrFile + ":");
         Console.WriteLine();
-        Console.WriteLine("    *.csv merge=csvmerge diff=csvmerge");
+        Console.WriteLine("    " + AttributesLine);
         Console.WriteLine();
+        Console.WriteLine(global
+            ? "Every repo on this machine now uses them; a repo's own .gitattributes can override per path."
+            : "Commit .gitattributes so collaborators get the mapping too.");
         Console.WriteLine("csvmerge must be on PATH when git runs the drivers.");
         return 0;
+    }
+
+    /// <summary>
+    /// The attributes file git consults for every repo: core.attributesFile if
+    /// configured, otherwise git's documented default of
+    /// $XDG_CONFIG_HOME/git/attributes (~/.config/git/attributes).
+    /// </summary>
+    private static string GlobalAttributesFile()
+    {
+        string? configured = GitCapture("config", "--global", "--path", "core.attributesFile");
+        if (!string.IsNullOrEmpty(configured))
+            return configured;
+
+        string? xdg = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME");
+        string baseDir = !string.IsNullOrEmpty(xdg)
+            ? xdg
+            : Path.Combine(
+                Environment.GetEnvironmentVariable("HOME")
+                    ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".config");
+        return Path.Combine(baseDir, "git", "attributes");
+    }
+
+    /// <summary>Append the *.csv mapping unless it is already present. Returns true if added.</summary>
+    private static bool EnsureAttributesLine(string path)
+    {
+        string text = File.Exists(path) ? File.ReadAllText(path) : "";
+        foreach (string raw in text.Split('\n'))
+        {
+            string line = raw.Trim();
+            var tokens = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (tokens.Length > 0 && tokens[0] == "*.csv"
+                && line.Contains("merge=csvmerge") && line.Contains("diff=csvmerge"))
+                return false;
+        }
+        string? dir = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        string prefix = text.Length > 0 && !text.EndsWith('\n') ? "\n" : "";
+        File.AppendAllText(path, prefix + AttributesLine + "\n");
+        return true;
+    }
+
+    private static string? GitCapture(params string[] args)
+    {
+        var psi = new ProcessStartInfo("git")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+        };
+        foreach (string a in args) psi.ArgumentList.Add(a);
+
+        using var process = Process.Start(psi)
+            ?? throw new InvalidOperationException("failed to start git");
+        string output = process.StandardOutput.ReadToEnd();
+        process.WaitForExit();
+        return process.ExitCode == 0 ? output.TrimEnd('\r', '\n') : null;
     }
 
     private static void GitConfig(string scope, string key, string value)
@@ -247,9 +321,13 @@ public static class Program
             Rows are labelled by an auto-detected discriminating column. Exit codes:
             0 identical, 1 different, 2 error.
 
-            install registers the merge driver and the diff driver in git config;
-            add "*.csv merge=csvmerge diff=csvmerge" to .gitattributes to activate
-            them, after which git diff / log -p show semantic CSV diffs.
+            install registers the merge and diff drivers in git config and maps
+            *.csv to them ("*.csv merge=csvmerge diff=csvmerge"). With --global the
+            mapping goes in git's global attributes file, wiring up every repo on
+            the machine; without it, the drivers go in the current repo's config
+            and the mapping in its .gitattributes (commit it so collaborators get
+            it too). After that, rebase/merge/cherry-pick/stash merge CSVs
+            semantically and git diff / log -p show cell-level diffs.
             """);
     }
 }

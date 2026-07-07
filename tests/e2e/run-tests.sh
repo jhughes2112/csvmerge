@@ -1268,11 +1268,28 @@ EOF
 }
 
 t54() {
-  begin t54_install_command "csvmerge install registers the merge AND diff drivers in local git config"
+  begin t54_install_command "csvmerge install registers both drivers in local config AND maps *.csv in .gitattributes"
   "$EXE" install > /dev/null 2>&1 || fail_ "install exited nonzero"
   [ "$(git config merge.csvmerge.driver)" = "csvmerge %O %A %B" ] || fail_ "merge driver config not written"
   [ -n "$(git config merge.csvmerge.name)" ] || fail_ "merge driver name not written"
   [ "$(git config diff.csvmerge.command)" = "csvmerge gitdiff" ] || fail_ "diff driver config not written"
+  grep -q '^\*\.csv merge=csvmerge diff=csvmerge$' .gitattributes || fail_ "mapping not added to .gitattributes"
+  "$EXE" install > /dev/null 2>&1 || fail_ "second install exited nonzero"
+  [ "$(grep -c 'diff=csvmerge' .gitattributes)" -eq 1 ] || fail_ "second install duplicated the mapping"
+  end
+}
+
+t60() {
+  begin t60_install_global "install --global maps *.csv in the global attributes file (sandboxed HOME)"
+  mkdir -p home
+  HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/home/.config" "$EXE" install --global > /dev/null 2>&1 \
+    || fail_ "install --global exited nonzero"
+  [ "$(HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/home/.config" git config --global merge.csvmerge.driver)" = "csvmerge %O %A %B" ] \
+    || fail_ "global merge driver config not written"
+  ATTRS="$PWD/home/.config/git/attributes"
+  grep -q '^\*\.csv merge=csvmerge diff=csvmerge$' "$ATTRS" 2>/dev/null || fail_ "mapping not in global attributes file"
+  HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/home/.config" "$EXE" install --global > /dev/null 2>&1
+  [ "$(grep -c 'diff=csvmerge' "$ATTRS")" -eq 1 ] || fail_ "second install duplicated the mapping"
   end
 }
 
@@ -1376,7 +1393,7 @@ t46; t47; t48; t49
 section "other git commands"
 t50; t51; t52
 section "CLI direct"
-t53; t54
+t53; t54; t60
 section "semantic diff"
 t57; t58
 section "weighted identity"

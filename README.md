@@ -1,5 +1,9 @@
 # csvmerge
 
+<p align="center">
+  <img src="csvmerge.png" alt="Slaying the CSV Dragon" width="256">
+</p>
+
 A git-native three-way merge driver **and semantic diff driver** for CSV
 files, built for **rebase**.
 
@@ -151,23 +155,39 @@ dotnet pack src/CsvMerge -c Release
 dotnet tool install --global csvmerge --add-source src/CsvMerge/bin/Release
 ```
 
-## Install into a repo
+## Install
 
-With `csvmerge` on PATH, register the merge and diff drivers (per repo, or
-`--global` for all repos):
+With `csvmerge` on PATH, one command wires up every repo on the machine:
 
 ```
-csvmerge install [--global]
+csvmerge install --global
 ```
 
-and map CSV files to them in `.gitattributes`:
+It registers the merge and diff drivers in your user git config and maps
+`*.csv` to them in git's global attributes file (`core.attributesFile` if you
+have one configured, otherwise `~/.config/git/attributes`). From then on
+`git rebase`, `git merge`, `git cherry-pick` and `git stash pop` use csvmerge
+automatically for `*.csv`, and `git diff` shows semantic diffs — no per-repo
+setup, and any repo's own `.gitattributes` can still override the mapping
+per path.
+
+To wire up a single repo instead, run it without `--global`:
+
+```
+csvmerge install
+```
+
+which registers the drivers in the repo's `.git/config` and adds the mapping
+line to its `.gitattributes`:
 
 ```
 *.csv merge=csvmerge diff=csvmerge
 ```
 
-From then on `git rebase`, `git merge`, `git cherry-pick` and `git stash pop`
-use csvmerge automatically for `*.csv`, and `git diff` shows semantic diffs.
+Commit `.gitattributes` and collaborators get the mapping too — harmless for
+anyone without csvmerge installed, since git falls back to its normal merge
+and diff when the named driver isn't defined. Both forms are idempotent:
+re-running never duplicates the mapping.
 
 ## Manual use
 
@@ -205,7 +225,7 @@ Unit tests (merge algorithm, in-process):
 dotnet test
 ```
 
-End-to-end scenario suite — 59 self-contained scripts that each build a real
+End-to-end scenario suite — 60 self-contained scripts that each build a real
 git repo, branch, edit CSVs with sed, commit, and **rebase through the
 installed merge driver**, then verify the merged file byte-for-byte (requires
 bash + git; on Windows run from Git Bash):
